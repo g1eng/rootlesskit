@@ -18,7 +18,55 @@ func NewChildDriver() copyup.ChildDriver {
 type childDriver struct {
 }
 
+// mkSymlinkForTargets create symlink for specific target files from srcDir
+func mkSymlinkForTargets(srcDir string, dstDir string, exclusionList []string) error {
+	var targetFiles []os.DirEntry
+	files, err := os.ReadDir(srcDir)
+	if err != nil {
+		return fmt.Errorf("reading dir %s: %w", srcDir, err)
+	}
+	isExcluded := func(n string) bool {
+		for _, excluded := range exclusionList {
+			if n == excluded {
+				return true
+			}
+		}
+		return false
+	}
+	for _, f := range files {
+		if !isExcluded(f.Name()) {
+			targetFiles = append(targetFiles, f)
+		}
+	}
+	for _, f := range targetFiles {
+		fFull := filepath.Join(srcDir, f.Name())
+		var symlinkSrc string
+		if f.Type()&os.ModeSymlink != 0 {
+			symlinkSrc, err = os.Readlink(fFull)
+			if err != nil {
+				return fmt.Errorf("reading dir %s: %w", fFull, err)
+			}
+		} else {
+			symlinkSrc = filepath.Join(filepath.Base(srcDir), f.Name())
+		}
+		symlinkDst := filepath.Join(dstDir, f.Name())
+		// `mount` may create extra `/etc/mtab` after mounting empty tmpfs on /etc
+		// https://github.com/rootless-containers/rootlesskit/issues/45
+		if err = os.RemoveAll(symlinkDst); err != nil {
+			return fmt.Errorf("removing %s: %w", symlinkDst, err)
+		}
+		if err := os.Symlink(symlinkSrc, symlinkDst); err != nil {
+			return fmt.Errorf("symlinking %s to %s: %w", symlinkSrc, symlinkDst, err)
+		}
+	}
+	return nil
+}
+
 func (d *childDriver) CopyUp(dirs []string) ([]string, error) {
+	return d.CopyUpWithExclusion(dirs, []string{})
+}
+
+func (d *childDriver) CopyUpWithExclusion(dirs []string, exclusionList []string) ([]string, error) {
 	// we create bind0 outside of StateDir so as to allow
 	// copying up /run with stateDir=/run/user/1001/rootlesskit/default.
 	bind0, err := os.MkdirTemp("/tmp", "rootlesskit-b")
@@ -50,30 +98,9 @@ func (d *childDriver) CopyUp(dirs []string) ([]string, error) {
 			return copied, fmt.Errorf("failed to move mount point from %s to %s: %w", bind0, bind1, err)
 		}
 
-		files, err := os.ReadDir(bind1)
+		err = mkSymlinkForTargets(bind1, d, exclusionList)
 		if err != nil {
-			return copied, fmt.Errorf("reading dir %s: %w", bind1, err)
-		}
-		for _, f := range files {
-			fFull := filepath.Join(bind1, f.Name())
-			var symlinkSrc string
-			if f.Type()&os.ModeSymlink != 0 {
-				symlinkSrc, err = os.Readlink(fFull)
-				if err != nil {
-					return copied, fmt.Errorf("reading dir %s: %w", fFull, err)
-				}
-			} else {
-				symlinkSrc = filepath.Join(filepath.Base(bind1), f.Name())
-			}
-			symlinkDst := filepath.Join(d, f.Name())
-			// `mount` may create extra `/etc/mtab` after mounting empty tmpfs on /etc
-			// https://github.com/rootless-containers/rootlesskit/issues/45
-			if err = os.RemoveAll(symlinkDst); err != nil {
-				return copied, fmt.Errorf("removing %s: %w", symlinkDst, err)
-			}
-			if err := os.Symlink(symlinkSrc, symlinkDst); err != nil {
-				return copied, fmt.Errorf("symlinking %s to %s: %w", symlinkSrc, symlinkDst, err)
-			}
+			return copied, err
 		}
 		copied = append(copied, d)
 	}

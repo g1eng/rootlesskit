@@ -133,10 +133,18 @@ func activateDev(dev, ip string, netmask int, gateway string, mtu int) error {
 	return nil
 }
 
-func setupCopyDir(driver copyup.ChildDriver, dirs []string) (bool, error) {
+func setupCopyDir(driver copyup.ChildDriver, dirs []string, exclusionDirs []string) (bool, error) {
 	if driver != nil {
+		var (
+			copied []string
+			err    error
+		)
 		etcWasCopied := false
-		copied, err := driver.CopyUp(dirs)
+		if len(exclusionDirs) == 0 {
+			copied, err = driver.CopyUp(dirs)
+		} else {
+			copied, err = driver.CopyUpWithExclusion(dirs, exclusionDirs)
+		}
 		for _, d := range copied {
 			if d == "/etc" {
 				etcWasCopied = true
@@ -194,6 +202,7 @@ type Opt struct {
 	NetworkDriver   network.ChildDriver // nil for HostNetwork
 	CopyUpDriver    copyup.ChildDriver  // cannot be nil if len(CopyUpDirs) != 0
 	CopyUpDirs      []string
+	CopyUpExclusion []string // exclusion list of paths to copy-up.
 	PortDriver      port.ChildDriver
 	MountProcfs     bool   // needs to be set if (and only if) parent.Opt.CreatePIDNS is set
 	Propagation     string // mount propagation type
@@ -249,7 +258,7 @@ func Child(opt Opt) error {
 	if err := setMountPropagation(opt.Propagation); err != nil {
 		return err
 	}
-	etcWasCopied, err := setupCopyDir(opt.CopyUpDriver, opt.CopyUpDirs)
+	etcWasCopied, err := setupCopyDir(opt.CopyUpDriver, opt.CopyUpDirs, opt.CopyUpExclusion)
 	if err != nil {
 		return err
 	}

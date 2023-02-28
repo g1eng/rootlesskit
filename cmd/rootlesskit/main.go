@@ -131,6 +131,10 @@ See https://rootlesscontaine.rs/getting-started/common/ .
 			Name:  "copy-up",
 			Usage: "mount a filesystem and copy-up the contents. e.g. \"--copy-up=/etc\" (typically required for non-host network)",
 		}, CategoryMount),
+		Categorize(&cli.StringSliceFlag{
+			Name:  "exclude-file",
+			Usage: "exclude specific target files or directories to copy-up. e.g. \"--exclude-file=/etc/selinux\"",
+		}, CategoryMount),
 		Categorize(&cli.StringFlag{
 			Name:  "copy-up-mode",
 			Usage: "copy-up mode [tmpfs+symlink]",
@@ -510,6 +514,7 @@ func createChildOpt(clicontext *cli.Context, pipeFDEnvKey string, targetCmd []st
 		return opt, fmt.Errorf("unknown network mode: %s", s)
 	}
 	opt.CopyUpDirs = clicontext.StringSlice("copy-up")
+	opt.CopyUpExclusion = clicontext.StringSlice("exclude-file")
 	switch s := clicontext.String("copy-up-mode"); s {
 	case "tmpfs+symlink":
 		opt.CopyUpDriver = tmpfssymlink.NewChildDriver()
