@@ -517,6 +517,9 @@ func createChildOpt(clicontext *cli.Context, pipeFDEnvKey string, targetCmd []st
 	opt.CopyUpDirs = clicontext.StringSlice("copy-up")
 	switch s := clicontext.String("copy-up-mode"); s {
 	case "tmpfs+symlink":
+		if len(clicontext.StringSlice("ignore")) != 0 {
+			return opt, fmt.Errorf("ignore option does not support the driver %s", s)
+		}
 		opt.CopyUpDriver = tmpfssymlink.NewChildDriver()
 		if len(opt.CopyUpDirs) != 0 && (opt.Propagation == "rshared" || opt.Propagation == "shared") {
 			return opt, fmt.Errorf("propagation %s does not support copy-up driver %s", opt.Propagation, s)
