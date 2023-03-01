@@ -15,6 +15,7 @@ import (
 
 	"github.com/rootless-containers/rootlesskit/pkg/child"
 	"github.com/rootless-containers/rootlesskit/pkg/common"
+	"github.com/rootless-containers/rootlesskit/pkg/copyup/bindmount_exclusive"
 	"github.com/rootless-containers/rootlesskit/pkg/copyup/tmpfssymlink"
 	"github.com/rootless-containers/rootlesskit/pkg/network/lxcusernic"
 	"github.com/rootless-containers/rootlesskit/pkg/network/slirp4netns"
@@ -130,6 +131,10 @@ See https://rootlesscontaine.rs/getting-started/common/ .
 		Categorize(&cli.StringSliceFlag{
 			Name:  "copy-up",
 			Usage: "mount a filesystem and copy-up the contents. e.g. \"--copy-up=/etc\" (typically required for non-host network)",
+		}, CategoryMount),
+		Categorize(&cli.StringSliceFlag{
+			Name:  "ignore",
+			Usage: "ignore specific path(s) to copy up e.g. \"--ignore /etc/selinux\"",
 		}, CategoryMount),
 		Categorize(&cli.StringFlag{
 			Name:  "copy-up-mode",
@@ -513,6 +518,11 @@ func createChildOpt(clicontext *cli.Context, pipeFDEnvKey string, targetCmd []st
 	switch s := clicontext.String("copy-up-mode"); s {
 	case "tmpfs+symlink":
 		opt.CopyUpDriver = tmpfssymlink.NewChildDriver()
+		if len(opt.CopyUpDirs) != 0 && (opt.Propagation == "rshared" || opt.Propagation == "shared") {
+			return opt, fmt.Errorf("propagation %s does not support copy-up driver %s", opt.Propagation, s)
+		}
+	case "bind-x": //bind-mount with optional ignore list
+		opt.CopyUpDriver = bindmount_exclusive.NewChildDriver(clicontext.StringSlice("ignore"))
 		if len(opt.CopyUpDirs) != 0 && (opt.Propagation == "rshared" || opt.Propagation == "shared") {
 			return opt, fmt.Errorf("propagation %s does not support copy-up driver %s", opt.Propagation, s)
 		}
