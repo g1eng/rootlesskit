@@ -34,7 +34,9 @@ func mkSymlinkForTargets(srcDir string, dstDir string, exclusionList []string) e
 		return false
 	}
 	for _, f := range files {
-		if !isExcluded(f.Name()) {
+		fFull := filepath.Join(dstDir, f.Name())
+		println("ffull:" + fFull)
+		if !isExcluded(fFull) {
 			targetFiles = append(targetFiles, f)
 		}
 	}
