@@ -14,15 +14,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/google/uuid"
 	"github.com/moby/vpnkit/go/pkg/vmnet"
 
 	"github.com/sirupsen/logrus"
 	"github.com/songgao/water"
 
-	"github.com/rootless-containers/rootlesskit/pkg/api"
-	"github.com/rootless-containers/rootlesskit/pkg/common"
-	"github.com/rootless-containers/rootlesskit/pkg/network"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/api"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/common"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/messages"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/network"
 )
 
 func NewParentDriver(binary string, mtu int, ifname string, disableHostLoopback bool) network.ParentDriver {
@@ -83,7 +85,7 @@ func (d *parentDriver) MTU() int {
 	return d.mtu
 }
 
-func (d *parentDriver) ConfigureNetwork(childPID int, stateDir string) (*common.NetworkMessage, func() error, error) {
+func (d *parentDriver) ConfigureNetwork(childPID int, stateDir, detachedNetNSPath string) (*messages.ParentInitNetworkDriverCompleted, func() error, error) {
 	var cleanups []func() error
 	vpnkitSocket := filepath.Join(stateDir, "vpnkit-ethernet.sock")
 	vpnkitCtx, vpnkitCancel := context.WithCancel(context.Background())
@@ -120,14 +122,14 @@ func (d *parentDriver) ConfigureNetwork(childPID int, stateDir string) (*common.
 	}
 	logrus.Debugf("connected to VPNKit vmnet")
 	// TODO: support configuration
-	netmsg := common.NetworkMessage{
+	netmsg := messages.ParentInitNetworkDriverCompleted{
 		Dev:     d.ifname,
 		IP:      vif.IP.String(),
 		Netmask: 24,
 		Gateway: "192.168.65.1",
 		DNS:     "192.168.65.1",
 		MTU:     d.mtu,
-		Opaque: map[string]string{
+		NetworkDriverOpaque: map[string]string{
 			opaqueMAC:    vif.ClientMAC.String(),
 			opaqueSocket: vpnkitSocket,
 			opaqueUUID:   vifUUID.String(),
@@ -170,14 +172,14 @@ func NewChildDriver() network.ChildDriver {
 type childDriver struct {
 }
 
-func (d *childDriver) ConfigureNetworkChild(netmsg *common.NetworkMessage) (tap string, err error) {
+func (d *childDriver) ConfigureNetworkChild(netmsg *messages.ParentInitNetworkDriverCompleted, detachedNetNSPath string) (tap string, err error) {
 	tapName := netmsg.Dev
 	if tapName == "" {
 		return "", errors.New("no dev is set")
 	}
-	macStr := netmsg.Opaque[opaqueMAC]
-	socket := netmsg.Opaque[opaqueSocket]
-	uuidStr := netmsg.Opaque[opaqueUUID]
+	macStr := netmsg.NetworkDriverOpaque[opaqueMAC]
+	socket := netmsg.NetworkDriverOpaque[opaqueSocket]
+	uuidStr := netmsg.NetworkDriverOpaque[opaqueUUID]
 	if macStr == "" {
 		return "", errors.New("no VPNKit MAC is set")
 	}
@@ -187,30 +189,44 @@ func (d *childDriver) ConfigureNetworkChild(netmsg *common.NetworkMessage) (tap 
 	if uuidStr == "" {
 		return "", errors.New("no VPNKit UUID is set")
 	}
-	return startVPNKitRoutines(context.TODO(), tapName, macStr, socket, uuidStr)
+	return startVPNKitRoutines(context.TODO(), tapName, macStr, socket, uuidStr, detachedNetNSPath)
 }
 
-func startVPNKitRoutines(ctx context.Context, tapName, macStr, socket, uuidStr string) (string, error) {
-	cmds := [][]string{
-		{"ip", "tuntap", "add", "name", tapName, "mode", "tap"},
-		{"ip", "link", "set", tapName, "address", macStr},
-		// IP stuff and MTU are configured in activateTap() in pkg/child/child.go
+func startVPNKitRoutines(ctx context.Context, tapName, macStr, socket, uuidStr, detachedNetNSPath string) (string, error) {
+	var tap *water.Interface
+	fn := func(_ ns.NetNS) error {
+		cmds := [][]string{
+			{"ip", "tuntap", "add", "name", tapName, "mode", "tap"},
+			{"ip", "link", "set", tapName, "address", macStr},
+			// IP stuff and MTU are configured in activateTap() in pkg/child/child.go
+		}
+		if err := common.Execs(os.Stderr, os.Environ(), cmds); err != nil {
+			return fmt.Errorf("executing %v: %w", cmds, err)
+		}
+		var err error
+		tap, err = water.New(
+			water.Config{
+				DeviceType: water.TAP,
+				PlatformSpecificParams: water.PlatformSpecificParams{
+					Name: tapName,
+				},
+			})
+		if err != nil {
+			return fmt.Errorf("creating tap %s: %w", tapName, err)
+		}
+		return nil
 	}
-	if err := common.Execs(os.Stderr, os.Environ(), cmds); err != nil {
-		return "", fmt.Errorf("executing %v: %w", cmds, err)
-	}
-	tap, err := water.New(
-		water.Config{
-			DeviceType: water.TAP,
-			PlatformSpecificParams: water.PlatformSpecificParams{
-				Name: tapName,
-			},
-		})
-	if err != nil {
-		return "", fmt.Errorf("creating tap %s: %w", tapName, err)
+	if detachedNetNSPath == "" {
+		if err := fn(nil); err != nil {
+			return "", err
+		}
+	} else {
+		if err := ns.WithNetNSPath(detachedNetNSPath, fn); err != nil {
+			return "", err
+		}
 	}
 	if tap.Name() != tapName {
-		return "", fmt.Errorf("expected %q, got %q: %w", tapName, tap.Name(), err)
+		return "", fmt.Errorf("expected %q, got %q", tapName, tap.Name())
 	}
 	vmnet, err := vmnet.New(ctx, socket)
 	if err != nil {

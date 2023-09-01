@@ -15,20 +15,17 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/gorilla/mux"
-
+	"github.com/rootless-containers/rootlesskit/v2/pkg/api/router"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/messages"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/network"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/parent/cgrouputil"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/parent/dynidtools"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/parent/idtools"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/port"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/sigproxy"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/sigproxy/signal"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
-
-	"github.com/rootless-containers/rootlesskit/pkg/api/router"
-	"github.com/rootless-containers/rootlesskit/pkg/common"
-	"github.com/rootless-containers/rootlesskit/pkg/msgutil"
-	"github.com/rootless-containers/rootlesskit/pkg/network"
-	"github.com/rootless-containers/rootlesskit/pkg/parent/cgrouputil"
-	"github.com/rootless-containers/rootlesskit/pkg/parent/dynidtools"
-	"github.com/rootless-containers/rootlesskit/pkg/parent/idtools"
-	"github.com/rootless-containers/rootlesskit/pkg/port"
-	"github.com/rootless-containers/rootlesskit/pkg/sigproxy"
-	"github.com/rootless-containers/rootlesskit/pkg/sigproxy/signal"
 )
 
 type Opt struct {
@@ -42,6 +39,7 @@ type Opt struct {
 	CreateCgroupNS   bool
 	CreateUTSNS      bool
 	CreateIPCNS      bool
+	DetachNetNS      bool
 	ParentEUIDEnvKey string // optional env key to propagate geteuid() value
 	ParentEGIDEnvKey string // optional env key to propagate getegid() value
 	Propagation      string
@@ -62,6 +60,7 @@ const (
 	StateFileLock     = "lock"
 	StateFileChildPID = "child_pid" // decimal pid number text
 	StateFileAPISock  = "api.sock"  // REST API Socket
+	StateFileNetNs    = "netns"     // rootlesskit network namespace
 )
 
 func checkPreflight(opt Opt) error {
@@ -143,7 +142,11 @@ func Parent(opt Opt) error {
 	defer os.RemoveAll(opt.StateDir)
 	defer lock.Unlock()
 
-	pipeR, pipeW, err := os.Pipe()
+	pipeR, pipeW, err := os.Pipe() // parent-to-child
+	if err != nil {
+		return err
+	}
+	pipe2R, pipe2W, err := os.Pipe() // child-to-parent
 	if err != nil {
 		return err
 	}
@@ -152,9 +155,13 @@ func Parent(opt Opt) error {
 		Pdeathsig:  syscall.SIGKILL,
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS,
 	}
+
 	if opt.NetworkDriver != nil {
-		cmd.SysProcAttr.Unshareflags |= syscall.CLONE_NEWNET
+		if !opt.DetachNetNS {
+			cmd.SysProcAttr.Unshareflags |= syscall.CLONE_NEWNET
+		}
 	}
+
 	if opt.CreatePIDNS {
 		// cannot be Unshareflags (panics)
 		cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWPID
@@ -171,8 +178,8 @@ func Parent(opt Opt) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.ExtraFiles = []*os.File{pipeR}
-	cmd.Env = append(os.Environ(), opt.PipeFDEnvKey+"=3")
+	cmd.ExtraFiles = []*os.File{pipeR, pipe2W}
+	cmd.Env = append(os.Environ(), opt.PipeFDEnvKey+"=3,4")
 	if opt.StateDirEnvKey != "" {
 		cmd.Env = append(cmd.Env, opt.StateDirEnvKey+"="+opt.StateDir)
 	}
@@ -185,9 +192,34 @@ func Parent(opt Opt) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start the child: %w", err)
 	}
+
+	msgParentHello := &messages.Message{
+		U: messages.U{
+			ParentHello: &messages.ParentHello{},
+		},
+	}
+	if err := messages.Send(pipeW, msgParentHello); err != nil {
+		return err
+	}
+	if _, err := messages.WaitFor(pipe2R, messages.Name(messages.ChildHello{})); err != nil {
+		return err
+	}
+
 	if err := setupUIDGIDMap(cmd.Process.Pid, opt.SubidSource); err != nil {
 		return fmt.Errorf("failed to setup UID/GID map: %w", err)
 	}
+	msgParentInitIdmapCompleted := &messages.Message{
+		U: messages.U{
+			ParentInitIdmapCompleted: &messages.ParentInitIdmapCompleted{},
+		},
+	}
+	if err := messages.Send(pipeW, msgParentInitIdmapCompleted); err != nil {
+		return err
+	}
+	if _, err := messages.WaitFor(pipe2R, messages.Name(messages.ChildInitUserNSCompleted{})); err != nil {
+		return err
+	}
+
 	sigc := sigproxy.ForwardAllSignals(context.TODO(), cmd.Process.Pid)
 	defer signal.StopCatch(sigc)
 
@@ -197,53 +229,55 @@ func Parent(opt Opt) error {
 		}
 	}
 
-	// send message 0
-	msg := common.Message{
-		Stage:    0,
-		Message0: common.Message0{},
-	}
-	if _, err := msgutil.MarshalToWriter(pipeW, &msg); err != nil {
-		return err
-	}
-
 	// configure Network driver
-	msg = common.Message{
-		Stage: 1,
-		Message1: common.Message1{
-			StateDir: opt.StateDir,
+	msgParentInitNetworkDriverCompleted := &messages.Message{
+		U: messages.U{
+			ParentInitNetworkDriverCompleted: &messages.ParentInitNetworkDriverCompleted{},
 		},
 	}
+
 	if opt.NetworkDriver != nil {
-		netMsg, cleanupNetwork, err := opt.NetworkDriver.ConfigureNetwork(cmd.Process.Pid, opt.StateDir)
+		var netns string
+		if opt.DetachNetNS {
+			netns = filepath.Join("/proc", strconv.Itoa(cmd.Process.Pid), "root", filepath.Clean(opt.StateDir), "netns")
+		}
+		netMsg, cleanupNetwork, err := opt.NetworkDriver.ConfigureNetwork(cmd.Process.Pid, opt.StateDir, netns)
 		if cleanupNetwork != nil {
 			defer cleanupNetwork()
 		}
 		if err != nil {
 			return fmt.Errorf("failed to setup network %+v: %w", opt.NetworkDriver, err)
 		}
-		msg.Message1.Network = *netMsg
+		msgParentInitNetworkDriverCompleted.U.ParentInitNetworkDriverCompleted = netMsg
+	}
+	if err := messages.Send(pipeW, msgParentInitNetworkDriverCompleted); err != nil {
+		return err
 	}
 
 	// configure Port driver
+	msgParentInitPortDriverCompleted := &messages.Message{
+		U: messages.U{
+			ParentInitPortDriverCompleted: &messages.ParentInitPortDriverCompleted{},
+		},
+	}
 	portDriverInitComplete := make(chan struct{})
 	portDriverQuit := make(chan struct{})
 	portDriverErr := make(chan error)
 	if opt.PortDriver != nil {
-		msg.Message1.Port.Opaque = opt.PortDriver.OpaqueForChild()
+		msgParentInitPortDriverCompleted.U.ParentInitPortDriverCompleted.PortDriverOpaque = opt.PortDriver.OpaqueForChild()
 		cctx := &port.ChildContext{
-			PID: cmd.Process.Pid,
-			IP:  net.ParseIP(msg.Network.IP).To4(),
+			IP: net.ParseIP(msgParentInitNetworkDriverCompleted.U.ParentInitNetworkDriverCompleted.IP).To4(),
 		}
 		go func() {
 			portDriverErr <- opt.PortDriver.RunParentDriver(portDriverInitComplete,
 				portDriverQuit, cctx)
 		}()
 	}
-
-	// send message 1
-	if _, err := msgutil.MarshalToWriter(pipeW, &msg); err != nil {
+	if err := messages.Send(pipeW, msgParentInitPortDriverCompleted); err != nil {
 		return err
 	}
+
+	// Close the parent-to-child pipe
 	if err := pipeW.Close(); err != nil {
 		return err
 	}

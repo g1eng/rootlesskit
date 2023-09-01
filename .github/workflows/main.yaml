@@ -3,7 +3,7 @@ on: [push, pull_request]
 jobs:
   test-unit:
     name: "Unit test"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
     - name: "Check out"
       uses: actions/checkout@v3
@@ -13,14 +13,14 @@ jobs:
       run: docker run --rm --privileged rootlesskit:test-unit
   test-cross:
     name: "Cross compilation test"
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v3
     - name: "Build binaries"
       run: DOCKER_BUILDKIT=1 docker build -o /tmp/artifact --target cross-artifact .
   test-integration:
     name: "Integration test"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
     - name: "Check out"
       uses: actions/checkout@v3
@@ -48,16 +48,36 @@ jobs:
       run: |
           docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
           rootlesskit:test-integration ./benchmark-iperf3-net.sh slirp4netns 1500 --slirp4netns-sandbox=auto --slirp4netns-seccomp=auto
+    - name: "Benchmark: Network (MTU=1500, network driver=slirp4netns with sandbox and seccomp) with detach-netns"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-net.sh slirp4netns 1500 --slirp4netns-sandbox=auto --slirp4netns-seccomp=auto --detach-netns
 # NOTE: MTU greater than 16424 is known not to work for VPNKit.
 # Also, MTU greather than 4K might not be effective for VPNKit: https://twitter.com/mugofsoup/status/1017665057738641408
     - name: "Benchmark: Network (MTU=1500, network driver=vpnkit)"
       run: |
           docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
           rootlesskit:test-integration ./benchmark-iperf3-net.sh vpnkit 1500
+    - name: "Benchmark: Network (MTU=1500, network driver=vpnkit) with detach-netns"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-net.sh vpnkit 1500 --detach-netns
+    - name: "Benchmark: Network (MTU=1500, network driver=pasta)"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-net.sh pasta 1500
+    - name: "Benchmark: Network (MTU=1500, network driver=pasta) with detach-netns"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-net.sh pasta 1500 --detach-netns
     - name: "Benchmark: Network (MTU=1500, network driver=lxc-user-nic)"
       run: |
           docker run --rm --privileged \
           rootlesskit:test-integration ./benchmark-iperf3-net.sh lxc-user-nic 1500
+    - name: "Benchmark: Network (MTU=1500, network driver=lxc-user-nic) with detach-netns"
+      run: |
+        docker run --rm --privileged \
+        rootlesskit:test-integration ./benchmark-iperf3-net.sh lxc-user-nic 1500 --detach-netns
     - name: "Benchmark: Network (MTU=1500, rootful veth for comparison)"
       run: |
           docker run --rm --privileged \
@@ -71,6 +91,10 @@ jobs:
       run: |
           docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
           rootlesskit:test-integration ./benchmark-iperf3-net.sh slirp4netns 65520 --slirp4netns-sandbox=auto --slirp4netns-seccomp=auto
+    - name: "Benchmark: Network (MTU=65520, network driver=pasta)"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-net.sh pasta 65520
     - name: "Benchmark: Network (MTU=65520, network driver=lxc-user-nic)"
       run: |
           docker run --rm --privileged \
@@ -80,19 +104,48 @@ jobs:
           docker run --rm --privileged \
           rootlesskit:test-integration ./benchmark-iperf3-net.sh rootful_veth 65520
 # ===== Benchmark: TCP Ports =====
-    - name: "Benchmark: TCP Ports (port driver=slirp4netns)"
+    - name: "Benchmark: TCP Ports (network driver=slirp4netns, port driver=slirp4netns)"
       run: |
           docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
           rootlesskit:test-integration ./benchmark-iperf3-port.sh slirp4netns
-    - name: "Benchmark: TCP Ports (port driver=builtin)"
+    - name: "Benchmark: TCP Ports (network driver=slirp4netns, port driver=slirp4netns) with detach-netns"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-port.sh slirp4netns --detach-netns
+    - name: "Benchmark: TCP Ports (network driver=slirp4netns, port driver=builtin)"
       run: |
           docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
           rootlesskit:test-integration ./benchmark-iperf3-port.sh builtin
+    - name: "Benchmark: TCP Ports (network driver=slirp4netns, port driver=builtin) with detach-netns"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-port.sh builtin --detach-netns
+    - name: "Benchmark: TCP Ports (network driver=pasta, port driver=implicit)"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-port.sh implicit --net=pasta
+    - name: "Benchmark: TCP Ports (network driver=pasta, port driver=implicit) with detach-netns"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-port.sh implicit --net=pasta --detach-netns
 # ===== Benchmark: UDP Ports =====
+    - name: "Benchmark: UDP Ports (port driver=slirp4netns)"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-port-udp.sh slirp4netns
+    - name: "Benchmark: UDP Ports (port driver=slirp4netns) with detach-netns"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-port-udp.sh slirp4netns --detach-netns
     - name: "Benchmark: UDP Ports (port driver=builtin)"
       run: |
           docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
           rootlesskit:test-integration ./benchmark-iperf3-port-udp.sh builtin
+    - name: "Benchmark: UDP Ports (port driver=builtin) with detach-netns"
+      run: |
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --device /dev/net/tun \
+          rootlesskit:test-integration ./benchmark-iperf3-port-udp.sh builtin --detach-netns
+# pasta+builtin does not work with UDP yet
   test-integration-docker:
     name: "Integration test (Docker)"
     runs-on: ubuntu-latest
@@ -120,6 +173,13 @@ jobs:
     - name: "Docker Integration test: net=vpnkit, port-driver=builtin"
       run: |
         docker run -d --name test --network custom --privileged -e DOCKERD_ROOTLESS_ROOTLESSKIT_NET=vpnkit      -e DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin rootlesskit:test-integration-docker
+        sleep 2
+        docker exec test docker info
+        docker exec test ./integration-docker.sh
+        docker rm -f test
+    - name: "Docker Integration test: net=pasta, port-driver=implicit"
+      run: |
+        docker run -d --name test --network custom --privileged -e DOCKERD_ROOTLESS_ROOTLESSKIT_NET=pasta       -e DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=implicit rootlesskit:test-integration-docker
         sleep 2
         docker exec test docker info
         docker exec test ./integration-docker.sh

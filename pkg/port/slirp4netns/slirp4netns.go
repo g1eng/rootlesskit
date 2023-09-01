@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/rootless-containers/rootlesskit/pkg/api"
-	"github.com/rootless-containers/rootlesskit/pkg/port"
-	"github.com/rootless-containers/rootlesskit/pkg/port/portutil"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/api"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/port"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/port/portutil"
 )
 
 func NewParentDriver(logWriter io.Writer, apiSocketPath string) (port.ParentDriver, error) {
@@ -201,7 +201,7 @@ func NewChildDriver() port.ChildDriver {
 type childDriver struct {
 }
 
-func (d *childDriver) RunChildDriver(opaque map[string]string, quit <-chan struct{}) error {
+func (d *childDriver) RunChildDriver(opaque map[string]string, quit <-chan struct{}, detachedNetNSPath string) error {
 	// NOP
 	<-quit
 	return nil

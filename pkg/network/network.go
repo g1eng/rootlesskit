@@ -3,8 +3,8 @@ package network
 import (
 	"context"
 
-	"github.com/rootless-containers/rootlesskit/pkg/api"
-	"github.com/rootless-containers/rootlesskit/pkg/common"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/api"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/messages"
 )
 
 // ParentDriver is called from the parent namespace
@@ -13,12 +13,15 @@ type ParentDriver interface {
 	// MTU returns MTU
 	MTU() int
 	// ConfigureNetwork sets up Slirp, updates msg, and returns destructor function.
-	ConfigureNetwork(childPID int, stateDir string) (netmsg *common.NetworkMessage, cleanup func() error, err error)
+	// detachedNetNSPath is set only for the detach-netns mode.
+	ConfigureNetwork(childPID int, stateDir, detachedNetNSPath string) (netmsg *messages.ParentInitNetworkDriverCompleted, cleanup func() error, err error)
 }
 
 // ChildDriver is called from the child namespace
 type ChildDriver interface {
+	// ConfigureNetworkChild is executed in the child's namespaces, excluding detached-netns.
+	//
 	// netmsg MAY be modified.
 	// devName is like "tap" or "eth0"
-	ConfigureNetworkChild(netmsg *common.NetworkMessage) (devName string, err error)
+	ConfigureNetworkChild(netmsg *messages.ParentInitNetworkDriverCompleted, detachedNetNSPath string) (devName string, err error)
 }

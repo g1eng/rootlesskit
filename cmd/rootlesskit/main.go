@@ -10,20 +10,22 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
-	"github.com/rootless-containers/rootlesskit/pkg/child"
-	"github.com/rootless-containers/rootlesskit/pkg/common"
-	"github.com/rootless-containers/rootlesskit/pkg/copyup/tmpfssymlink"
-	"github.com/rootless-containers/rootlesskit/pkg/network/lxcusernic"
-	"github.com/rootless-containers/rootlesskit/pkg/network/slirp4netns"
-	"github.com/rootless-containers/rootlesskit/pkg/network/vpnkit"
-	"github.com/rootless-containers/rootlesskit/pkg/parent"
-	"github.com/rootless-containers/rootlesskit/pkg/port/builtin"
-	"github.com/rootless-containers/rootlesskit/pkg/port/portutil"
-	slirp4netns_port "github.com/rootless-containers/rootlesskit/pkg/port/slirp4netns"
-	"github.com/rootless-containers/rootlesskit/pkg/version"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/child"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/common"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/copyup/tmpfssymlink"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/network/lxcusernic"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/network/pasta"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/network/slirp4netns"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/network/vpnkit"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/parent"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/port/builtin"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/port/portutil"
+	slirp4netns_port "github.com/rootless-containers/rootlesskit/v2/pkg/port/slirp4netns"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/version"
 )
 
 func main() {
@@ -34,6 +36,10 @@ func main() {
 		parentEGIDEnvKey = "ROOTLESSKIT_PARENT_EGID" // documented
 	)
 	iAmChild := os.Getenv(pipeFDEnvKey) != ""
+	id := "parent"
+	if iAmChild {
+		id = "child " // padded to len("parent")
+	}
 	debug := false
 	app := cli.NewApp()
 	app.Name = "rootlesskit"
@@ -68,14 +74,23 @@ See https://rootlesscontaine.rs/getting-started/common/ .
 			Destination: &debug,
 		}, CategoryMisc),
 		Categorize(&cli.StringFlag{
+			Name:  "print-semver",
+			Usage: "print a version component as a decimal integer [major, minor, patch]",
+		}, CategoryMisc),
+		Categorize(&cli.StringFlag{
 			Name:  "state-dir",
 			Usage: "state directory",
 		}, CategoryState),
 		Categorize(&cli.StringFlag{
 			Name:  "net",
-			Usage: "network driver [host, slirp4netns, vpnkit, lxc-user-nic(experimental)]",
+			Usage: "network driver [host, pasta(experimental), slirp4netns, vpnkit, lxc-user-nic(experimental)]",
 			Value: "host",
 		}, CategoryNetwork),
+		Categorize(&cli.StringFlag{
+			Name:  "pasta-binary",
+			Usage: "path of pasta binary for --net=pasta",
+			Value: "pasta",
+		}, CategoryPasta),
 		Categorize(&cli.StringFlag{
 			Name:  "slirp4netns-binary",
 			Usage: "path of slirp4netns binary for --net=slirp4netns",
@@ -108,16 +123,16 @@ See https://rootlesscontaine.rs/getting-started/common/ .
 		}, CategoryLXCUserNic),
 		Categorize(&cli.IntFlag{
 			Name:  "mtu",
-			Usage: "MTU for non-host network (default: 65520 for slirp4netns, 1500 for others)",
+			Usage: "MTU for non-host network (default: 65520 for pasta and slirp4netns, 1500 for others)",
 			Value: 0, // resolved into 65520 for slirp4netns, 1500 for others
 		}, CategoryNetwork),
 		Categorize(&cli.StringFlag{
 			Name:  "cidr",
-			Usage: "CIDR for slirp4netns network (default: 10.0.2.0/24)",
+			Usage: "CIDR for pasta and slirp4netns networks (default: 10.0.2.0/24)",
 		}, CategoryNetwork),
 		Categorize(&cli.StringFlag{
 			Name:  "ifname",
-			Usage: "Network interface name (default: tap0 for slirp4netns and vpnkit, eth0 for lxc-user-nic)",
+			Usage: "Network interface name (default: tap0 for pasta, slirp4netns, and vpnkit; eth0 for lxc-user-nic)",
 		}, CategoryNetwork),
 		Categorize(&cli.BoolFlag{
 			Name:  "disable-host-loopback",
@@ -125,7 +140,7 @@ See https://rootlesscontaine.rs/getting-started/common/ .
 		}, CategoryNetwork),
 		Categorize(&cli.BoolFlag{
 			Name:  "ipv6",
-			Usage: "enable IPv6 routing. Unrelated to port forwarding. Only supported for slirp4netns. (experimental)",
+			Usage: "enable IPv6 routing. Unrelated to port forwarding. Only supported for pasta and slirp4netns. (experimental)",
 		}, CategoryNetwork),
 		Categorize(&cli.StringSliceFlag{
 			Name:  "copy-up",
@@ -142,7 +157,7 @@ See https://rootlesscontaine.rs/getting-started/common/ .
 		}, CategoryMount),
 		Categorize(&cli.StringFlag{
 			Name:  "port-driver",
-			Usage: "port driver for non-host network. [none, builtin, slirp4netns]",
+			Usage: "port driver for non-host network. [none, implicit (for pasta), builtin, slirp4netns]",
 			Value: "none",
 		}, CategoryPort),
 		Categorize(&cli.StringSliceFlag{
@@ -166,6 +181,10 @@ See https://rootlesscontaine.rs/getting-started/common/ .
 			Name:  "ipcns",
 			Usage: "create an IPC namespace",
 		}, CategoryProcess),
+		Categorize(&cli.BoolFlag{
+			Name:  "detach-netns",
+			Usage: "detach network namespaces ",
+		}, CategoryNetwork),
 		Categorize(&cli.StringFlag{
 			Name:  "propagation",
 			Usage: "mount propagation [rprivate, rslave]",
@@ -207,14 +226,37 @@ OPTIONS:
 		if debug {
 			logrus.SetLevel(logrus.DebugLevel)
 		}
+		formatter := &logrusFormatter{
+			id:        id,
+			Formatter: logrus.StandardLogger().Formatter,
+		}
+		logrus.SetFormatter(formatter)
+
 		return nil
 	}
 	app.Action = func(clicontext *cli.Context) error {
+		if s := clicontext.String("print-semver"); s != "" {
+			sv, err := semver.NewVersion(version.Version)
+			if err != nil {
+				return fmt.Errorf("failed to parse version %q: %w", version.Version, err)
+			}
+			switch s {
+			case "major":
+				fmt.Fprintln(clicontext.App.Writer, sv.Major())
+			case "minor":
+				fmt.Fprintln(clicontext.App.Writer, sv.Minor())
+			case "patch":
+				fmt.Fprintln(clicontext.App.Writer, sv.Patch())
+			default:
+				return fmt.Errorf("expected --print-semver=(major|minor|patch), got %q", s)
+			}
+			return nil
+		}
 		if clicontext.NArg() < 1 {
 			return errors.New("no command specified")
 		}
 		if iAmChild {
-			childOpt, err := createChildOpt(clicontext, pipeFDEnvKey, clicontext.Args().Slice())
+			childOpt, err := createChildOpt(clicontext, pipeFDEnvKey, stateDirEnvKey, clicontext.Args().Slice())
 			if err != nil {
 				return err
 			}
@@ -228,10 +270,6 @@ OPTIONS:
 		return parent.Parent(parentOpt)
 	}
 	if err := app.Run(os.Args); err != nil {
-		id := "parent"
-		if iAmChild {
-			id = "child " // padded to len("parent")
-		}
 		if debug {
 			fmt.Fprintf(os.Stderr, "[rootlesskit:%s] error: %+v\n", id, err)
 		} else {
@@ -244,6 +282,16 @@ OPTIONS:
 		}
 		os.Exit(code)
 	}
+}
+
+type logrusFormatter struct {
+	id string
+	logrus.Formatter
+}
+
+func (f *logrusFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	entry.Message = fmt.Sprintf("[rootlesskit:%s] %s", f.id, entry.Message)
+	return f.Formatter.Format(entry)
 }
 
 func parseCIDR(s string) (*net.IPNet, error) {
@@ -269,6 +317,7 @@ func createParentOpt(clicontext *cli.Context, pipeFDEnvKey, stateDirEnvKey, pare
 		CreateCgroupNS:   clicontext.Bool("cgroupns"),
 		CreateUTSNS:      clicontext.Bool("utsns"),
 		CreateIPCNS:      clicontext.Bool("ipcns"),
+		DetachNetNS:      clicontext.Bool("detach-netns"),
 		ParentEUIDEnvKey: parentEUIDEnvKey,
 		ParentEGIDEnvKey: parentEGIDEnvKey,
 		Propagation:      clicontext.String("propagation"),
@@ -317,14 +366,14 @@ func createParentOpt(clicontext *cli.Context, pipeFDEnvKey, stateDirEnvKey, pare
 	ipv6 := clicontext.Bool("ipv6")
 	if ipv6 {
 		logrus.Warn("ipv6 is experimental")
-		if s := clicontext.String("net"); s != "slirp4netns" {
+		if s := clicontext.String("net"); s != "pasta" && s != "slirp4netns" {
 			logrus.Warnf("--ipv6 is discarded for --net=%s", s)
 		}
 	}
 
 	disableHostLoopback := clicontext.Bool("disable-host-loopback")
 	if !disableHostLoopback && clicontext.String("net") != "host" {
-		logrus.Warn("specifying --disable-host-loopback is highly recommended to prohibit connecting to 127.0.0.1:* on the host namespace (requires slirp4netns or VPNKit)")
+		logrus.Warn("specifying --disable-host-loopback is highly recommended to prohibit connecting to 127.0.0.1:* on the host namespace (requires pasta, slirp4netns, or VPNKit)")
 	}
 
 	slirp4netnsAPISocketPath := ""
@@ -338,10 +387,29 @@ func createParentOpt(clicontext *cli.Context, pipeFDEnvKey, stateDirEnvKey, pare
 			logrus.Warnf("unsupported mtu for --net=host: %d", mtu)
 		}
 		if ipnet != nil {
-			return opt, errors.New("custom cidr is supported only for --net=slirp4netns")
+			return opt, errors.New("custom cidr is not supported for --net=host")
 		}
 		if ifname != "" {
 			return opt, errors.New("ifname cannot be specified for --net=host")
+		}
+	case "pasta":
+		logrus.Warn("\"pasta\" network driver is experimental. Needs very recent version of pasta (see docs/network.md). No support for forwarding UDP ports (yet).")
+		binary := clicontext.String("pasta-binary")
+		if _, err := exec.LookPath(binary); err != nil {
+			return opt, err
+		}
+		var implicitPortForward bool
+		switch portDriver := clicontext.String("port-driver"); portDriver {
+		case "none":
+			implicitPortForward = false
+		case "implicit":
+			implicitPortForward = true
+		default:
+			return opt, errors.New("network \"pasta\" requires port driver \"none\" or \"implicit\"")
+		}
+		opt.NetworkDriver, err = pasta.NewParentDriver(&logrusDebugWriter{label: "network/pasta"}, binary, mtu, ipnet, ifname, disableHostLoopback, ipv6, implicitPortForward)
+		if err != nil {
+			return opt, err
 		}
 	case "slirp4netns":
 		binary := clicontext.String("slirp4netns-binary")
@@ -364,14 +432,20 @@ func createParentOpt(clicontext *cli.Context, pipeFDEnvKey, stateDirEnvKey, pare
 		enableSandbox := false
 		switch s := clicontext.String("slirp4netns-sandbox"); s {
 		case "auto":
-			// this might not work when /etc/resolv.conf is a symlink to a file outside /etc or /run
+			// Sandbox might not work when /etc/resolv.conf is a symlink to a file outside /etc or /run
 			// https://github.com/rootless-containers/slirp4netns/issues/116
-			enableSandbox = features.SupportsEnableSandbox
+
+			// Sandbox is known to be incompatible with detach-netns
+			// https://github.com/rootless-containers/slirp4netns/issues/317
+			enableSandbox = features.SupportsEnableSandbox && !opt.DetachNetNS
 		case "true":
 			enableSandbox = true
 			if !features.SupportsEnableSandbox {
 				// NOTREACHED
 				return opt, errors.New("unsupported slirp4netns version: lacks SupportsEnableSandbox")
+			}
+			if opt.DetachNetNS {
+				return opt, errors.New("--slirp4netns-sandbox conflicts with --detach-netns (https://github.com/rootless-containers/slirp4netns/issues/317)")
 			}
 		case "false", "": // default
 			// NOP
@@ -402,7 +476,7 @@ func createParentOpt(clicontext *cli.Context, pipeFDEnvKey, stateDirEnvKey, pare
 		}
 	case "vpnkit":
 		if ipnet != nil {
-			return opt, errors.New("custom cidr is supported only for --net=slirp4netns")
+			return opt, errors.New("custom cidr is not supported for --net=vpnkit")
 		}
 		binary := clicontext.String("vpnkit-binary")
 		if _, err := exec.LookPath(binary); err != nil {
@@ -412,7 +486,7 @@ func createParentOpt(clicontext *cli.Context, pipeFDEnvKey, stateDirEnvKey, pare
 	case "lxc-user-nic":
 		logrus.Warn("\"lxc-user-nic\" network driver is experimental")
 		if ipnet != nil {
-			return opt, errors.New("custom cidr is supported only for --net=slirp4netns")
+			return opt, errors.New("custom cidr is not supported for --net=lxc-user-nic")
 		}
 		if !disableHostLoopback {
 			logrus.Warn("--disable-host-loopback is implicitly set for lxc-user-nic")
@@ -434,6 +508,11 @@ func createParentOpt(clicontext *cli.Context, pipeFDEnvKey, stateDirEnvKey, pare
 		if len(clicontext.StringSlice("publish")) != 0 {
 			return opt, fmt.Errorf("port driver %q does not support publishing ports", s)
 		}
+	case "implicit":
+		if clicontext.String("net") != "pasta" {
+			return opt, errors.New("port driver requires pasta network")
+		}
+		// NOP
 	case "slirp4netns":
 		if clicontext.String("net") != "slirp4netns" {
 			return opt, errors.New("port driver requires slirp4netns network")
@@ -479,12 +558,15 @@ func (w *logrusDebugWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func createChildOpt(clicontext *cli.Context, pipeFDEnvKey string, targetCmd []string) (child.Opt, error) {
+func createChildOpt(clicontext *cli.Context, pipeFDEnvKey, stateDirEnvKey string, targetCmd []string) (child.Opt, error) {
 	pidns := clicontext.Bool("pidns")
+	detachNetNS := clicontext.Bool("detach-netns")
 	opt := child.Opt{
 		PipeFDEnvKey:    pipeFDEnvKey,
+		StateDirEnvKey:  stateDirEnvKey,
 		TargetCmd:       targetCmd,
 		MountProcfs:     pidns,
+		DetachNetNS:     detachNetNS,
 		Propagation:     clicontext.String("propagation"),
 		EvacuateCgroup2: clicontext.String("evacuate-cgroup2") != "",
 	}
@@ -504,6 +586,8 @@ func createChildOpt(clicontext *cli.Context, pipeFDEnvKey string, targetCmd []st
 	switch s := clicontext.String("net"); s {
 	case "host":
 		// NOP
+	case "pasta":
+		opt.NetworkDriver = pasta.NewChildDriver()
 	case "slirp4netns":
 		opt.NetworkDriver = slirp4netns.NewChildDriver()
 	case "vpnkit":
@@ -525,7 +609,7 @@ func createChildOpt(clicontext *cli.Context, pipeFDEnvKey string, targetCmd []st
 		return opt, fmt.Errorf("unknown copy-up mode: %s", s)
 	}
 	switch s := clicontext.String("port-driver"); s {
-	case "none":
+	case "none", "implicit":
 		// NOP
 	case "slirp4netns":
 		opt.PortDriver = slirp4netns_port.NewChildDriver()

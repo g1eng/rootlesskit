@@ -10,9 +10,21 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/rootless-containers/rootlesskit/pkg/parent/idtools"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/parent/idtools"
 	"github.com/sirupsen/logrus"
 )
+
+func withoutDuplicates(sliceList []idtools.SubIDRange) []idtools.SubIDRange {
+	seenKeys := make(map[idtools.SubIDRange]bool)
+	var list []idtools.SubIDRange
+	for _, item := range sliceList {
+		if _, value := seenKeys[item]; !value {
+			seenKeys[item] = true
+			list = append(list, item)
+		}
+	}
+	return list
+}
 
 func GetSubIDRanges(uid int, username string) ([]idtools.SubIDRange, []idtools.SubIDRange, error) {
 	getsubidsExeName := "getsubids"
@@ -52,8 +64,8 @@ func GetSubIDRanges(uid int, username string) ([]idtools.SubIDRange, []idtools.S
 		}
 	}
 
-	u := append(uByUsername, uByUID...)
-	g := append(gByUsername, gByUID...)
+	u := withoutDuplicates(append(uByUsername, uByUID...))
+	g := withoutDuplicates(append(gByUsername, gByUID...))
 	return u, g, nil
 }
 

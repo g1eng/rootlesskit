@@ -15,9 +15,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/rootless-containers/rootlesskit/pkg/api"
-	"github.com/rootless-containers/rootlesskit/pkg/api/client"
-	"github.com/rootless-containers/rootlesskit/pkg/port"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/api"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/api/client"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/port"
 	"github.com/sirupsen/logrus"
 )
 
@@ -150,6 +150,15 @@ func xmain(f *os.File) error {
 	info, err := c.Info(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to call info API, probably RootlessKit binary is too old (needs to be v0.14.0 or later): %w", err)
+	}
+
+	// info.PortDriver is currently nil for "none" and "implicit", but this may change in future
+	if info.PortDriver == nil || info.PortDriver.Driver == "none" || info.PortDriver.Driver == "implicit" {
+		realProxyExe, err := exec.LookPath(realProxy)
+		if err != nil {
+			return err
+		}
+		return syscall.Exec(realProxyExe, append([]string{realProxy}, os.Args[1:]...), os.Environ())
 	}
 
 	// use loopback IP as the child IP, when port-driver="builtin"
